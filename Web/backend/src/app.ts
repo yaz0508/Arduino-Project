@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
@@ -21,12 +21,15 @@ const allowedOrigins = process.env.CORS_ORIGINS
 
 app.use(
   cors({
-    origin: (origin, callback) => {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void
+    ) => {
       // Allow requests with no origin (like mobile apps or curl requests)
       if (!origin) return callback(null, true);
       
       // Check if origin matches any allowed origin
-      const isAllowed = allowedOrigins.some((allowed) => {
+      const isAllowed = allowedOrigins.some((allowed: string | RegExp) => {
         if (typeof allowed === "string") {
           return origin === allowed;
         }
@@ -57,7 +60,7 @@ app.use(
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 // POST /game/start
-app.post("/game/start", async (req, res) => {
+app.post("/game/start", async (req: Request, res: Response) => {
   const body = req.body as Partial<GameStartBody>;
   if (!body.player1Name || !body.player2Name) {
     return res.status(400).json({ error: "player1Name and player2Name are required" });
@@ -85,7 +88,7 @@ app.post("/game/start", async (req, res) => {
 });
 
 // POST /game/score
-app.post("/game/score", async (req, res) => {
+app.post("/game/score", async (req: Request, res: Response) => {
   const body = req.body as Partial<GameScoreBody>;
   if (!body.gameId) {
     return res.status(400).json({ error: "gameId is required" });
@@ -108,7 +111,7 @@ app.post("/game/score", async (req, res) => {
 });
 
 // POST /game/end
-app.post("/game/end", async (req, res) => {
+app.post("/game/end", async (req: Request, res: Response) => {
   const body = req.body as Partial<GameEndBody>;
   if (!body.gameId || !body.winner) {
     return res.status(400).json({ error: "gameId and winner are required" });
@@ -134,7 +137,7 @@ app.post("/game/end", async (req, res) => {
 });
 
 // GET /matches - list all finished matches (history)
-app.get("/matches", async (_req, res) => {
+app.get("/matches", async (_req: Request, res: Response) => {
   try {
     const matches = await prisma.match.findMany({
       where: { status: "finished" },
@@ -148,7 +151,7 @@ app.get("/matches", async (_req, res) => {
 });
 
 // GET /game/:gameId - live status for a specific game (for Game Page polling)
-app.get("/game/:gameId", async (req, res) => {
+app.get("/game/:gameId", async (req: Request, res: Response) => {
   const { gameId } = req.params;
   try {
     const match = await prisma.match.findUnique({
@@ -165,7 +168,7 @@ app.get("/game/:gameId", async (req, res) => {
 });
 
 // Health check endpoint for Render
-app.get("/health", (_req, res) => {
+app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
