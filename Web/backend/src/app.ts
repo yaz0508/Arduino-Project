@@ -9,18 +9,52 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+
+// CORS configuration - allow all Vercel preview deployments
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(",")
+  : [
+      "http://localhost:5173",
+      "http://localhost:3000",
+      /^https:\/\/.*\.vercel\.app$/, // Allow all Vercel preview deployments
+    ];
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173",
-      "https://your-frontend.vercel.app"
-    ],
-    methods: ["GET", "POST"],
-    credentials: false
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      // Check if origin matches any allowed origin
+      const isAllowed = allowedOrigins.some((allowed) => {
+        if (typeof allowed === "string") {
+          return origin === allowed;
+        }
+        if (allowed instanceof RegExp) {
+          return allowed.test(origin);
+        }
+        return false;
+      });
+      
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: false,
   })
 );
-app.use(helmet());
-app.use(morgan("dev"));
+
+// Helmet configuration - adjust for API needs
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 // POST /game/start
 app.post("/game/start", async (req, res) => {
@@ -128,6 +162,11 @@ app.get("/game/:gameId", async (req, res) => {
     console.error(err);
     return res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// Health check endpoint for Render
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 export default app;
