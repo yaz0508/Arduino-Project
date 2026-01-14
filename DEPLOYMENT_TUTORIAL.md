@@ -205,8 +205,10 @@ In Vercel project settings, go to **"Environment Variables"** and add:
 
 **Example:**
 ```
-VITE_API_BASE_URL=https://laser-game-backend.onrender.com
+VITE_API_BASE_URL=https://lazer-game-backend.onrender.com
 ```
+
+**Note:** Your actual backend URL is `https://lazer-game-backend.onrender.com` and frontend is `https://lazer-game.vercel.app/`
 
 **⚠️ Important:** 
 - Make sure to add this for **Production**, **Preview**, and **Development** environments

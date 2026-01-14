@@ -16,8 +16,8 @@ const char* WIFI_SSID     = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // ---- Backend configuration ----
-// Example: "http://your-backend.onrender.com"
-const char* BACKEND_BASE_URL = "http://YOUR_BACKEND_HOST";
+// Your Render backend URL (use https:// for Render)
+const char* BACKEND_BASE_URL = "https://lazer-game-backend.onrender.com";
 const char* API_GAME_START   = "/game/start";
 const char* API_GAME_SCORE   = "/game/score";
 const char* API_GAME_END     = "/game/end";
