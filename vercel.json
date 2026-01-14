@@ -1,0 +1,5 @@
+{
+  "buildCommand": "cd Web/frontend && npm run build",
+  "outputDirectory": "Web/frontend/dist",
+  "installCommand": "cd Web/frontend && npm install"
+}
