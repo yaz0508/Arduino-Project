@@ -1,10 +1,8 @@
-// ESP32-WROOM-32 DevKit V1 (38-pin)
-// Firmware for 2-player laser shooter game
-// - State machine: IDLE, RUNNING, FINISHED
-// - 4 analog sensors with timing-based hit validation
-// - Time-based scoring using millis()
-// - Buzzer feedback (short + long buzz)
-// - WiFi + REST: /game/start, /game/score, /game/end
+// ESP32 Laser Game Firmware - Dual Buzzer Edition
+// - Player 1: Sensors SP/SN (36/39) | Laser Pin 26 | Buzzer Pin 25
+// - Player 2: Sensors 34/35         | Laser Pin 27 | Buzzer Pin 33
+// - Button Start: Pin 18
+// - Button Reset: Pin 19
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -12,52 +10,54 @@
 // ======================== CONFIGURATION ========================
 
 // ---- WiFi configuration ----
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID     = "ADAPT LNG";     // <--- CHANGE THIS
+const char* WIFI_PASSWORD = "sigepo123"; // <--- CHANGE THIS
 
 // ---- Backend configuration ----
-// Your Render backend URL (use https:// for Render)
 const char* BACKEND_BASE_URL = "https://lazer-game-backend.onrender.com";
 const char* API_GAME_START   = "/game/start";
 const char* API_GAME_SCORE   = "/game/score";
 const char* API_GAME_END     = "/game/end";
 
 // ---- Player configuration ----
-// These should match what you configure / display in the frontend.
 const char* PLAYER1_NAME = "Player 1";
 const char* PLAYER2_NAME = "Player 2";
 
+// IMPORTANT: Arduino will create its own game and get the gameId
+// The frontend will need to use the SAME gameId that Arduino generates
+String currentGameId = "";  // Empty initially - will be set when game starts
+
 // ---- Pin assignments ----
-// Sensors (analog inputs, input-only pins)
-const int PIN_P1_S1 = 36;  // GPIO36 (VP)
-const int PIN_P1_S2 = 39;  // GPIO39 (VN)
-const int PIN_P2_S1 = 34;  // GPIO34
-const int PIN_P2_S2 = 35;  // GPIO35
+// Sensors (ADC Pins - use 32-35 or 4/12-15 to avoid boot conflicts)
+// NOTE: Avoid pins 36, 39 as they can cause boot issues
+const int PIN_P1_S1 = 32;  // GPIO 32 (ADC4_CH4)
+const int PIN_P1_S2 = 33;  // GPIO 33 (ADC5_CH5)
+const int PIN_P2_S1 = 34;  // GPIO 34 (ADC6_CH6)
+const int PIN_P2_S2 = 35;  // GPIO 35 (ADC7_CH7)
 
-// Laser emitters (active HIGH control)
-const int PIN_P1_LASER = 26;  // GPIO26
-const int PIN_P2_LASER = 27;  // GPIO27
+// Lasers
+// const int PIN_P1_LASER = 26;  // NOT NEEDED - External laser only
+// const int PIN_P2_LASER = 27;  // NOT NEEDED - External laser only  
 
-// Passive buzzer (simple on/off; could be extended to PWM tone)
-const int PIN_BUZZER = 25;    // GPIO25
+// Buzzers (One for each player)
+const int PIN_P1_BUZZER = 25; // Player 1 Buzzer
+const int PIN_P2_BUZZER = 4;  // Player 2 Buzzer (GPIO 4 - Safe pin)
 
-// Buttons (normally open to GND, use internal pull-up)
-const int PIN_BTN_START = 18; // GPIO18
-const int PIN_BTN_RESET = 19; // GPIO19
+// Buttons
+const int PIN_BTN_START = 0; 
+const int PIN_BTN_RESET = 19; 
 
 // ---- Game tuning ----
-
 // ADC threshold for valid laser hit (0 - 4095).
-// You MUST calibrate this value for your sensors and environment.
-const int SENSOR_THRESHOLD = 2000;
+const int SENSOR_THRESHOLD = 2000; // <--- Calibrate this if needed!
 
 // Time constants (ms)
-const unsigned long SAMPLE_INTERVAL_MS   = 50;   // sensor sampling
-const unsigned long HIT_MIN_DURATION_MS  = 200;  // continuous above threshold before scoring
-const unsigned long COOL_DOWN_MS         = 100;  // after hit loss before new hit
-const unsigned long SCORE_TICK_MS        = 100;  // +1 point every 100 ms
-const unsigned long SHORT_BEEP_MS        = 50;   // beep when scoring starts
-const unsigned long LONG_BUZZ_MS         = 3000; // buzz when game ends
+const unsigned long SAMPLE_INTERVAL_MS   = 50;   
+const unsigned long HIT_MIN_DURATION_MS  = 200;  
+const unsigned long COOL_DOWN_MS         = 100;  
+const unsigned long SCORE_TICK_MS        = 100;  
+const unsigned long SHORT_BEEP_MS        = 100;  // Hit beep duration
+const unsigned long LONG_BUZZ_MS         = 3000; // Win beep duration
 
 // Target score to win
 const int WIN_SCORE = 100;
@@ -72,31 +72,28 @@ enum GameState {
 
 struct SensorState {
   int pin;
-  int value;                     // latest ADC reading
-  bool aboveThreshold;           // currently above threshold
-  unsigned long aboveStartTime;  // when it first went above threshold
-  bool validHit;                 // has been above threshold for >= HIT_MIN_DURATION_MS
-  unsigned long lastBelowTime;   // last time it went below threshold
+  int value;
+  bool aboveThreshold;
+  unsigned long aboveStartTime;
+  bool validHit;
+};
+
+// Independent Buzzer State
+struct PlayerBuzzer {
+  int pin;
+  bool active;
+  unsigned long offAt;
 };
 
 struct PlayerState {
-  // Indexes into sensor array for this player (0..3)
   int sensorIndexA;
   int sensorIndexB;
-
-  // Current score
   int score;
-
-  // Hit / scoring state
-  int activeSensorIndex;         // which sensor is currently scoring (-1 = none)
-  bool scoringActive;            // true if currently scoring
-  unsigned long cooldownUntil;   // time until which we cannot start a new hit
-  unsigned long lastScoreTick;   // last time we added score (while scoringActive == true)
-};
-
-struct BuzzerState {
-  bool active;                   // currently on
-  unsigned long offAt;           // time when buzzer should be turned off
+  int activeSensorIndex;
+  bool scoringActive;
+  unsigned long cooldownUntil;
+  unsigned long lastScoreTick;
+  PlayerBuzzer* myBuzzer; // Pointer to this player's buzzer
 };
 
 struct PendingRequest {
@@ -104,68 +101,54 @@ struct PendingRequest {
   String body;
   bool inUse;
   uint8_t attempts;
-  unsigned long nextAttempt;     // when to attempt next send
+  unsigned long nextAttempt;
 };
 
 // ======================== GLOBALS ========================
 
 GameState gameState = STATE_IDLE;
-
-// 4 sensors total
 SensorState sensors[4];
 
-// Player 1 uses sensors 0 and 1
-// Player 2 uses sensors 2 and 3
+// Buzzers
+PlayerBuzzer buzzer1;
+PlayerBuzzer buzzer2;
+
+// Players
 PlayerState player1;
 PlayerState player2;
 
-// Buzzer state
-BuzzerState buzzer;
-
-// Game timing
 unsigned long lastSampleTime = 0;
-
-// Simple request queue
 const int MAX_REQUESTS = 5;
 PendingRequest requestQueue[MAX_REQUESTS];
 
-// Current game ID issued by backend (/game/start response)
-String currentGameId = "";
+bool lastStartBtnState = false;
+bool lastResetBtnState = false;
 
-// Button state tracking (for edge detection)
-bool lastStartBtnState = HIGH;
-bool lastResetBtnState = HIGH;
+// ======================== BUZZER FUNCTIONS ========================
 
-// ======================== UTILITY FUNCTIONS ========================
-
-// Turn buzzer on or off (passive buzzer, simple on/off)
-void setBuzzer(bool on) {
-  digitalWrite(PIN_BUZZER, on ? HIGH : LOW);
-  buzzer.active = on;
-  if (!on) {
-    buzzer.offAt = 0;
-  }
+// Turn a specific buzzer on/off
+void setBuzzerState(PlayerBuzzer& b, bool on) {
+  digitalWrite(b.pin, on ? HIGH : LOW);
+  b.active = on;
+  if (!on) b.offAt = 0;
 }
 
-// Schedule a buzzer pulse for a specific duration (non-blocking)
-void buzzerPulse(unsigned long durationMs) {
+// Trigger a pulse for a specific buzzer
+void buzzerPulse(PlayerBuzzer& b, unsigned long durationMs) {
   unsigned long now = millis();
-  setBuzzer(true);
-  buzzer.offAt = now + durationMs;
+  setBuzzerState(b, true);
+  b.offAt = now + durationMs;
 }
 
-// Update buzzer each loop, turning it off when time expires
-void updateBuzzer() {
-  if (buzzer.active) {
-    unsigned long now = millis();
-    if (now >= buzzer.offAt) {
-      setBuzzer(false);
-    }
-  }
+// Check both buzzers and turn them off if time is up
+void updateBuzzers() {
+  unsigned long now = millis();
+  if (buzzer1.active && now >= buzzer1.offAt) setBuzzerState(buzzer1, false);
+  if (buzzer2.active && now >= buzzer2.offAt) setBuzzerState(buzzer2, false);
 }
 
-// Enqueue an HTTP POST request; non-blocking.
-// Requests will be sent later by processRequestQueue().
+// ======================== HTTP & UTILS ========================
+
 void enqueuePost(const String& path, const String& body) {
   for (int i = 0; i < MAX_REQUESTS; i++) {
     if (!requestQueue[i].inUse) {
@@ -173,74 +156,88 @@ void enqueuePost(const String& path, const String& body) {
       requestQueue[i].body = body;
       requestQueue[i].inUse = true;
       requestQueue[i].attempts = 0;
-      requestQueue[i].nextAttempt = 0;  // ready to send ASAP
+      requestQueue[i].nextAttempt = 0;
       return;
     }
   }
-  // Queue full; could log or handle overflow here.
 }
 
-// Process one pending HTTP request (if any) with simple retry logic.
 void processRequestQueue() {
   if (WiFi.status() != WL_CONNECTED) {
-    // Do not attempt any requests if WiFi is down.
+    Serial.println("⚠ WiFi not connected. Skipping request.");
     return;
   }
-
+  
   unsigned long now = millis();
 
   for (int i = 0; i < MAX_REQUESTS; i++) {
     if (!requestQueue[i].inUse) continue;
     if (now < requestQueue[i].nextAttempt) continue;
 
+    Serial.println("\n--- Sending HTTP Request ---");
+    Serial.print("Attempt: ");
+    Serial.println(requestQueue[i].attempts + 1);
+    
     HTTPClient http;
     String url = String(BACKEND_BASE_URL) + requestQueue[i].path;
+    Serial.print("URL: ");
+    Serial.println(url);
+    Serial.print("Body: ");
+    Serial.println(requestQueue[i].body);
+
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
+    http.setTimeout(5000); // 5 second timeout
 
     int httpCode = http.POST(requestQueue[i].body);
+    Serial.print("Response Code: ");
+    Serial.println(httpCode);
+    
     if (httpCode > 0 && httpCode < 400) {
-      // Success; consume this request
       String payload = http.getString();
-
-      // If this is /game/start and no gameId set yet, try to extract it
+      Serial.print("Response: ");
+      Serial.println(payload);
+      
+      // Extract gameId from /game/start response
       if (requestQueue[i].path == API_GAME_START && currentGameId.length() == 0) {
-        // Very simple extraction: expect {"gameId":"..."} in response
         int idx = payload.indexOf("\"gameId\"");
         if (idx >= 0) {
           int colon = payload.indexOf(':', idx);
-          int quote1 = payload.indexOf('"', colon);
-          int quote2 = payload.indexOf('"', quote1 + 1);
-          if (quote1 >= 0 && quote2 > quote1) {
-            currentGameId = payload.substring(quote1 + 1, quote2);
+          int q1 = payload.indexOf('"', colon);
+          int q2 = payload.indexOf('"', q1 + 1);
+          if (q1 >= 0 && q2 > q1) {
+            currentGameId = payload.substring(q1 + 1, q2);
+            Serial.print("✓ Game ID received: ");
+            Serial.println(currentGameId);
+            Serial.println("=== GAME READY FOR SCORING ===");
           }
         }
       }
-
       requestQueue[i].inUse = false;
+      Serial.println("✓ Request successful");
     } else {
-      // Failed; schedule retry if attempts left
+      Serial.print("✗ Request failed. ");
+      String error = http.errorToString(httpCode);
+      Serial.println(error);
+      
       requestQueue[i].attempts++;
       if (requestQueue[i].attempts >= 5) {
-        // Drop after too many failures
+        Serial.println("✗ Max retries reached. Giving up.");
         requestQueue[i].inUse = false;
       } else {
-        // Exponential backoff: 2s, 4s, 8s, ...
-        unsigned long delayMs = 2000UL << (requestQueue[i].attempts - 1);
-        requestQueue[i].nextAttempt = now + delayMs;
+        requestQueue[i].nextAttempt = now + (2000UL << (requestQueue[i].attempts - 1));
+        Serial.print("Retry in ");
+        Serial.print(2000UL << (requestQueue[i].attempts - 1));
+        Serial.println("ms");
       }
     }
-
     http.end();
-
-    // Process only one request per loop to keep things responsive
     return;
   }
 }
 
 // ======================== SENSOR & SCORING LOGIC ========================
 
-// Initialize sensor metadata
 void initSensors() {
   sensors[0].pin = PIN_P1_S1;
   sensors[1].pin = PIN_P1_S2;
@@ -250,110 +247,77 @@ void initSensors() {
   for (int i = 0; i < 4; i++) {
     sensors[i].value = 0;
     sensors[i].aboveThreshold = false;
-    sensors[i].aboveStartTime = 0;
     sensors[i].validHit = false;
-    sensors[i].lastBelowTime = 0;
   }
 }
 
-// Reset a player's state and link its sensors
-void resetPlayer(PlayerState& p, int idxA, int idxB) {
+// Link player to sensors AND specific buzzer
+void resetPlayer(PlayerState& p, int idxA, int idxB, PlayerBuzzer* b) {
   p.sensorIndexA = idxA;
   p.sensorIndexB = idxB;
   p.score = 0;
   p.activeSensorIndex = -1;
   p.scoringActive = false;
   p.cooldownUntil = 0;
-  p.lastScoreTick = 0;
+  p.myBuzzer = b; // Assign buzzer
 }
 
-// Sample all sensors every SAMPLE_INTERVAL_MS
 void sampleSensors() {
   unsigned long now = millis();
   for (int i = 0; i < 4; i++) {
     int raw = analogRead(sensors[i].pin);
     sensors[i].value = raw;
-
-    bool wasAbove = sensors[i].aboveThreshold;
     bool isAbove = (raw >= SENSOR_THRESHOLD);
 
     if (isAbove) {
-      if (!wasAbove) {
-        // Just crossed threshold
+      if (!sensors[i].aboveThreshold) {
         sensors[i].aboveThreshold = true;
         sensors[i].aboveStartTime = now;
       } else {
-        // Still above; check if valid hit time reached
         if (!sensors[i].validHit && (now - sensors[i].aboveStartTime >= HIT_MIN_DURATION_MS)) {
           sensors[i].validHit = true;
         }
       }
     } else {
-      // Below threshold
       sensors[i].aboveThreshold = false;
       sensors[i].validHit = false;
-      sensors[i].lastBelowTime = now;
     }
   }
 }
 
-// Determine which sensor (if any) is currently valid for scoring for a given player.
-// Returns index in sensors[] or -1 if none valid.
-int chooseValidSensorForPlayer(const PlayerState& p) {
-  int idxA = p.sensorIndexA;
-  int idxB = p.sensorIndexB;
-
-  bool validA = sensors[idxA].validHit;
-  bool validB = sensors[idxB].validHit;
-
-  if (!validA && !validB) return -1;
-  if (validA && !validB) return idxA;
-  if (!validA && validB) return idxB;
-
-  // Both valid -> choose stronger signal
-  if (sensors[idxA].value >= sensors[idxB].value) {
-    return idxA;
-  } else {
-    return idxB;
-  }
-}
-
-// Update scoring for one player based on current sensor states
 void updatePlayerScoring(PlayerState& p) {
   unsigned long now = millis();
-  int chosenSensor = chooseValidSensorForPlayer(p);
+  
+  // Find valid hits
+  bool hitA = sensors[p.sensorIndexA].validHit;
+  bool hitB = sensors[p.sensorIndexB].validHit;
+  int bestSensor = -1;
 
-  if (chosenSensor == -1) {
-    // No valid hit currently
+  if (hitA && hitB) bestSensor = (sensors[p.sensorIndexA].value > sensors[p.sensorIndexB].value) ? p.sensorIndexA : p.sensorIndexB;
+  else if (hitA) bestSensor = p.sensorIndexA;
+  else if (hitB) bestSensor = p.sensorIndexB;
+
+  if (bestSensor == -1) {
     if (p.scoringActive) {
-      // Hit just ended -> start cooldown
       p.scoringActive = false;
-      p.activeSensorIndex = -1;
       p.cooldownUntil = now + COOL_DOWN_MS;
     }
     return;
   }
 
-  // We have at least one valid hit
+  // Valid hit detected
   if (!p.scoringActive) {
-    // Check cooldown
-    if (now < p.cooldownUntil) {
-      // Still cooling down; ignore
-      return;
-    }
-    // Start a new scoring hit
+    if (now < p.cooldownUntil) return;
+    
+    // START SCORING & BUZZ
     p.scoringActive = true;
-    p.activeSensorIndex = chosenSensor;
+    p.activeSensorIndex = bestSensor;
     p.lastScoreTick = now;
-
-    // Short beep on new valid scoring hit (once per hit start)
-    buzzerPulse(SHORT_BEEP_MS);
-  } else {
-    // Already scoring; ensure we use the stronger of the two if both valid.
-    p.activeSensorIndex = chosenSensor;
+    buzzerPulse(*p.myBuzzer, SHORT_BEEP_MS); // Beep only this player's buzzer
+    Serial.println("HIT DETECTED - Buzzer activated!");
   }
 
-  // While scoring is active, accumulate score every SCORE_TICK_MS
+  // Accumulate Score
   if (p.scoringActive) {
     unsigned long elapsed = now - p.lastScoreTick;
     if (elapsed >= SCORE_TICK_MS) {
@@ -365,227 +329,180 @@ void updatePlayerScoring(PlayerState& p) {
   }
 }
 
-// ======================== GAME LOGIC ========================
+// ======================== GAME CONTROL ========================
 
-// Send a /game/start REST event
-void sendGameStart() {
-  // Reset game ID so that /game/start response can set it.
+void startNewGame() {
+  Serial.println("\n>>> GAME START INITIATED <<<");
+  
+  // Reset players & Assign Buzzers
+  resetPlayer(player1, 0, 1, &buzzer1);
+  resetPlayer(player2, 2, 3, &buzzer2);
+
+  initSensors();
+  gameState = STATE_RUNNING;
+  
+  Serial.println("Game Running - Sensors Active");
+  Serial.println("Creating game and waiting for gameId...");
+
   currentGameId = "";
-
-  String body = "{";
-  body += "\"player1Name\":\"" + String(PLAYER1_NAME) + "\",";
-  body += "\"player2Name\":\"" + String(PLAYER2_NAME) + "\"";
-  body += "}";
-
+  String body = "{\"player1Name\":\"" + String(PLAYER1_NAME) + "\",\"player2Name\":\"" + String(PLAYER2_NAME) + "\"}";
   enqueuePost(API_GAME_START, body);
 }
 
-// Send a /game/score REST event
-void sendGameScore() {
-  String body = "{";
-  body += "\"gameId\":\"" + currentGameId + "\",";
-  body += "\"player1Score\":" + String(player1.score) + ",";
-  body += "\"player2Score\":" + String(player2.score);
-  body += "}";
+void endGame(const String& winner) {
+  // Lasers are external - no control needed
+  
+  // VICTORY BUZZ: Only buzz the winner's buzzer!
+  if (winner == PLAYER1_NAME) {
+    buzzerPulse(buzzer1, LONG_BUZZ_MS);
+  } else if (winner == PLAYER2_NAME) {
+    buzzerPulse(buzzer2, LONG_BUZZ_MS);
+  } else {
+    // Tie? Buzz both briefly
+    buzzerPulse(buzzer1, 1000);
+    buzzerPulse(buzzer2, 1000);
+  }
 
-  enqueuePost(API_GAME_SCORE, body);
-}
-
-// Send a /game/end REST event
-void sendGameEnd(const String& winner) {
-  String body = "{";
-  body += "\"gameId\":\"" + currentGameId + "\",";
-  body += "\"player1Score\":" + String(player1.score) + ",";
-  body += "\"player2Score\":" + String(player2.score) + ",";
-  body += "\"winner\":\"" + winner + "\"";
-  body += "}";
-
+  String body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":" + String(player1.score) + ",\"player2Score\":" + String(player2.score) + ",\"winner\":\"" + winner + "\"}";
   enqueuePost(API_GAME_END, body);
-}
-
-// Determine human-readable winner name based on scores
-String determineWinnerName() {
-  if (player1.score >= WIN_SCORE && player1.score > player2.score) {
-    return String(PLAYER1_NAME);
-  } else if (player2.score >= WIN_SCORE && player2.score > player1.score) {
-    return String(PLAYER2_NAME);
-  } else if (player1.score >= WIN_SCORE && player2.score >= WIN_SCORE) {
-    // Tie-break: higher score wins (or Player 1 by default)
-    if (player1.score > player2.score) return String(PLAYER1_NAME);
-    if (player2.score > player1.score) return String(PLAYER2_NAME);
-    return "Tie";
-  }
-  return "";
-}
-
-// Called when we transition to a new game
-void startNewGame() {
-  // Reset players
-  resetPlayer(player1, 0, 1);
-  resetPlayer(player2, 2, 3);
-
-  // Reset sensors
-  initSensors();
-
-  // Turn lasers ON (or adjust logic for your game)
-  digitalWrite(PIN_P1_LASER, HIGH);
-  digitalWrite(PIN_P2_LASER, HIGH);
-
-  // Transition state
-  gameState = STATE_RUNNING;
-
-  // Send game start event to backend
-  sendGameStart();
-}
-
-// End the current game and notify backend
-void endGame(const String& winnerName) {
-  // Turn lasers OFF for safety
-  digitalWrite(PIN_P1_LASER, LOW);
-  digitalWrite(PIN_P2_LASER, LOW);
-
-  // Long buzz
-  buzzerPulse(LONG_BUZZ_MS);
-
-  // Send game end event
-  sendGameEnd(winnerName);
-
   gameState = STATE_FINISHED;
-}
-
-// ======================== WIFI ========================
-
-// Connect (or reconnect) to WiFi; called at setup and periodically.
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  // Non-blocking-ish connect: try for ~10 seconds in short steps
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-    delay(200); // acceptable at setup time
-  }
 }
 
 // ======================== SETUP & LOOP ========================
 
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  
+  Serial.println("\n\n=== LASER GAME SYSTEM STARTING ===");
+  Serial.println("Initializing pins...");
 
-  // Configure output pins
-  pinMode(PIN_P1_LASER, OUTPUT);
-  pinMode(PIN_P2_LASER, OUTPUT);
-  pinMode(PIN_BUZZER, OUTPUT);
+  // Setup Outputs (Only Buzzers - Lasers are external)
+  // No laser pin setup needed
+  
+  // Setup Dual Buzzers
+  buzzer1.pin = PIN_P1_BUZZER;
+  buzzer2.pin = PIN_P2_BUZZER;
+  pinMode(buzzer1.pin, OUTPUT);
+  pinMode(buzzer2.pin, OUTPUT);
+  setBuzzerState(buzzer1, false);
+  setBuzzerState(buzzer2, false);
 
-  // Ensure outputs off initially
-  digitalWrite(PIN_P1_LASER, LOW);
-  digitalWrite(PIN_P2_LASER, LOW);
-  setBuzzer(false);
-
-  // Configure buttons
+  // Setup Inputs
   pinMode(PIN_BTN_START, INPUT_PULLUP);
   pinMode(PIN_BTN_RESET, INPUT_PULLUP);
 
-  // Initialize sensors and players
   initSensors();
-  resetPlayer(player1, 0, 1);
-  resetPlayer(player2, 2, 3);
+  resetPlayer(player1, 0, 1, &buzzer1);
+  resetPlayer(player2, 2, 3, &buzzer2);
 
-  lastSampleTime = millis();
-
-  // Connect to WiFi
-  connectWiFi();
-
-  Serial.println("Laser game firmware ready. Press START button to begin.");
+  // Connect WiFi
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("✓ WiFi CONNECTED! IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("✗ WiFi FAILED TO CONNECT");
+  }
+  
+  Serial.println("Backend URL: " + String(BACKEND_BASE_URL));
+  Serial.println("System Ready. Press START button.");
 }
 
 void loop() {
   unsigned long now = millis();
 
-  // ---- Button handling (edge detection) ----
-  bool startBtnState = digitalRead(PIN_BTN_START); // HIGH = not pressed, LOW = pressed
-  bool resetBtnState = digitalRead(PIN_BTN_RESET);
-
-  bool startPressed = (lastStartBtnState == HIGH && startBtnState == LOW);
-  bool resetPressed = (lastResetBtnState == HIGH && resetBtnState == LOW);
-
-  lastStartBtnState = startBtnState;
-  lastResetBtnState = resetBtnState;
-
-  // ---- State machine ----
-  switch (gameState) {
-    case STATE_IDLE: {
-      // Waiting for start button to begin a new game
-      if (startPressed) {
-        Serial.println("Starting new game...");
-        startNewGame();
-      }
-      break;
-    }
-
-    case STATE_RUNNING: {
-      // Sampling sensors every SAMPLE_INTERVAL_MS
-      if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
-        lastSampleTime += SAMPLE_INTERVAL_MS;
-        sampleSensors();
-
-        // Update players' scoring based on current sensor states
-        updatePlayerScoring(player1);
-        updatePlayerScoring(player2);
-
-        // Check for win condition
-        bool p1Won = (player1.score >= WIN_SCORE);
-        bool p2Won = (player2.score >= WIN_SCORE);
-
-        if (p1Won || p2Won) {
-          String winner = determineWinnerName();
-          Serial.print("Game finished. Winner: ");
-          Serial.println(winner);
-          endGame(winner);
-        } else {
-          // Send periodic score update while the game is running.
-          // To reduce traffic, we send only every N samples.
-          static int sampleCount = 0;
-          sampleCount++;
-          if (sampleCount >= 4) { // roughly every 200 ms (4 * 50 ms)
-            sendGameScore();
-            sampleCount = 0;
-          }
-        }
-      }
-
-      // Allow reset button to abort game and go back to IDLE
-      if (resetPressed) {
-        Serial.println("Game aborted by reset.");
-        endGame("Aborted");
-      }
-      break;
-    }
-
-    case STATE_FINISHED: {
-      // Game over; wait for reset button to return to IDLE
-      if (resetPressed) {
-        Serial.println("Resetting to IDLE.");
-        gameState = STATE_IDLE;
-      }
-      break;
-    }
+  // Debounce buttons simply
+  bool startBtn = (digitalRead(PIN_BTN_START) == LOW);
+  bool resetBtn = (digitalRead(PIN_BTN_RESET) == LOW);
+  
+  // DEBUG: Print button states every few seconds
+  static unsigned long lastButtonDebug = 0;
+  if (now - lastButtonDebug > 3000) {
+    lastButtonDebug = now;
+    Serial.print("Button States - START: ");
+    Serial.print(startBtn ? "PRESSED" : "released");
+    Serial.print(" | RESET: ");
+    Serial.println(resetBtn ? "PRESSED" : "released");
   }
 
-  // ---- Background tasks ----
-  updateBuzzer();
-  processRequestQueue();
-
-  // Attempt WiFi reconnect if disconnected (non-blocking check)
+  // WiFi Reconnect Check
   static unsigned long lastWiFiCheck = 0;
   if (now - lastWiFiCheck > 5000) {
     lastWiFiCheck = now;
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi disconnected, attempting reconnect...");
-      connectWiFi();
+      Serial.println("WiFi disconnected, reconnecting...");
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
   }
 
-  // Do not use delay() here to keep everything non-blocking
-}
+  // State Machine
+  switch (gameState) {
+    case STATE_IDLE:
+      if (startBtn && !lastStartBtnState) {  // Detect transition: released -> pressed
+         Serial.println("\n>>> START BUTTON PRESSED <<<");
+         startNewGame();
+      }
+      break;
 
+    case STATE_RUNNING:
+      if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+        lastSampleTime += SAMPLE_INTERVAL_MS;
+        sampleSensors();
+        updatePlayerScoring(player1);
+        updatePlayerScoring(player2);
+
+        // Win Condition
+        if (player1.score >= WIN_SCORE) {
+          Serial.println("\n>>> PLAYER 1 WINS <<<");
+          endGame(PLAYER1_NAME);
+        }
+        else if (player2.score >= WIN_SCORE) {
+          Serial.println("\n>>> PLAYER 2 WINS <<<");
+          endGame(PLAYER2_NAME);
+        }
+        else {
+           // Send periodic score (approx every 200ms)
+           static int c=0; if(++c>=4){
+             c=0;
+             Serial.print("Score update - P1: ");
+             Serial.print(player1.score);
+             Serial.print(" | P2: ");
+             Serial.println(player2.score);
+             String body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":" + String(player1.score) + ",\"player2Score\":" + String(player2.score) + "}";
+             enqueuePost(API_GAME_SCORE, body);
+           }
+        }
+      }
+      if (resetBtn && !lastResetBtnState) {  // Detect transition: released -> pressed
+         Serial.println("\n>>> RESET BUTTON PRESSED <<<");
+         endGame("Aborted");
+      }
+      break;
+
+    case STATE_FINISHED:
+      if (resetBtn && !lastResetBtnState) {  // Detect transition: released -> pressed
+         Serial.println("Reset to IDLE");
+         gameState = STATE_IDLE;
+      }
+      break;
+  }
+
+  lastStartBtnState = startBtn; 
+  lastResetBtnState = resetBtn;
+
+  updateBuzzers();
+  processRequestQueue();
+}

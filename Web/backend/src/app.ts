@@ -167,6 +167,47 @@ app.get("/game/:gameId", async (req: Request, res: Response) => {
   }
 });
 
+// GET /game/status - Returns current game status (RUNNING or IDLE)
+// ESP32s poll this endpoint to know when to start/stop
+let gameStatus: { status: "IDLE" | "RUNNING"; gameId: string | null } = { status: "IDLE", gameId: null };
+
+app.get("/game/status", (_req: Request, res: Response) => {
+  res.status(200).json(gameStatus);
+});
+
+// POST /game/control - Admin endpoint to start/stop game
+app.post("/game/control", async (req: Request, res: Response) => {
+  const { action, gameId } = req.body;
+  
+  if (action === "start" && gameId) {
+    gameStatus = { status: "RUNNING", gameId };
+    return res.status(200).json({ ok: true, message: "Game started", gameStatus });
+  } else if (action === "stop") {
+    gameStatus = { status: "IDLE", gameId: null };
+    
+    // Save game to finished status if gameId exists
+    if (gameId) {
+      try {
+        await prisma.match.update({
+          where: { gameId },
+          data: { 
+            status: "finished", 
+            endedAt: new Date()
+          }
+        });
+        console.log(`Game ${gameId} manually stopped and saved`);
+      } catch (err) {
+        console.error(`Failed to save game ${gameId}:`, err);
+        // Continue anyway - status change is more important
+      }
+    }
+    
+    return res.status(200).json({ ok: true, message: "Game stopped", gameStatus });
+  } else {
+    return res.status(400).json({ error: "Invalid action or missing gameId" });
+  }
+});
+
 // Health check endpoint for Render
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });

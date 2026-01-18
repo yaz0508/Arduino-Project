@@ -1,14 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { useGameStore } from "../store/gameStore";
-import { getGame, Match } from "../api/client";
+import { getGame, controlGame, Match } from "../api/client";
+import { useNavigate } from "react-router-dom";
 
 const POLL_INTERVAL_MS = 1000;
 
 const GamePage: React.FC = () => {
   const { gameId, player1Name, player2Name } = useGameStore();
+  const navigate = useNavigate();
   const [match, setMatch] = useState<Match | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     if (!gameId) return;
@@ -25,7 +28,7 @@ const GamePage: React.FC = () => {
 
         if (data.status === "finished") {
           setLocked(true);
-          return; // stop polling
+          return;
         }
 
         timer = window.setTimeout(poll, POLL_INTERVAL_MS);
@@ -46,8 +49,23 @@ const GamePage: React.FC = () => {
     };
   }, [gameId]);
 
+  const handleStopGame = async () => {
+    try {
+      setStopping(true);
+      await controlGame("stop");
+      setLocked(true);
+      setTimeout(() => {
+        navigate("/");
+      }, 1500);
+    } catch (err) {
+      console.error(err);
+      setError("Failed to stop game.");
+      setStopping(false);
+    }
+  };
+
   if (!gameId) {
-    return <p className="text-sm text-slate-300">No active game selected. Start a new game first.</p>;
+    return <p className="text-sm text-slate-300">No active game selected.</p>;
   }
 
   const p1Score = match?.player1Score ?? 0;
@@ -79,23 +97,33 @@ const GamePage: React.FC = () => {
 
         <div className="mt-4 flex items-center justify-between text-xs text-slate-400">
           <span>Game ID: {gameId}</span>
-          <span>Status: {finished ? "Finished" : "Running..."}</span>
+          <span>Status: {finished ? "Finished" : "Running 🎮"}</span>
         </div>
 
         {finished && winner && (
           <div className="mt-4 rounded-lg bg-emerald-600/20 border border-emerald-500/50 px-4 py-3 text-center">
             <p className="text-sm font-semibold text-emerald-300">
-              Winner: <span className="font-bold">{winner}</span>
+              🏆 Winner: <span className="font-bold">{winner}</span>
             </p>
             <p className="text-xs text-emerald-200/80 mt-1">
-              Scores locked. Start a new match to play again.
+              Game finished. Returning to home in a moment...
             </p>
           </div>
         )}
 
+        {!finished && !locked && (
+          <button
+            onClick={handleStopGame}
+            disabled={stopping}
+            className="mt-4 w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-60 disabled:cursor-not-allowed transition"
+          >
+            {stopping ? "Stopping..." : "🛑 Stop Game"}
+          </button>
+        )}
+
         {locked && !finished && (
-          <p className="mt-4 text-xs text-yellow-300">
-            UI locked; waiting for final result from ESP32.
+          <p className="mt-4 text-xs text-yellow-300 text-center">
+            Game stopping... Vests will sync within 2 seconds.
           </p>
         )}
       </div>

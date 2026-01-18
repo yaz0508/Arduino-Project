@@ -16,13 +16,10 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response) {
-      // Server responded with error status
       console.error("API Error:", error.response.status, error.response.data);
     } else if (error.request) {
-      // Request made but no response received
       console.error("Network Error: No response from server");
     } else {
-      // Something else happened
       console.error("Error:", error.message);
     }
     return Promise.reject(error);
@@ -47,6 +44,11 @@ export interface GameStartResponse {
   matchId: string;
 }
 
+export interface GameStatusResponse {
+  status: "RUNNING" | "IDLE";
+  gameId: string | null;
+}
+
 export async function startGame(player1Name: string, player2Name: string): Promise<GameStartResponse> {
   const res = await apiClient.post<GameStartResponse>("/game/start", {
     player1Name,
@@ -64,4 +66,20 @@ export async function getMatches(): Promise<Match[]> {
   const res = await apiClient.get<Match[]>("/matches");
   return res.data;
 }
+
+// NEW: Get current game status (RUNNING or IDLE)
+export async function getGameStatus(): Promise<GameStatusResponse> {
+  const res = await apiClient.get<GameStatusResponse>("/game/status");
+  return res.data;
+}
+
+// NEW: Admin control to start/stop game
+export async function controlGame(action: "start" | "stop", gameId?: string): Promise<any> {
+  const res = await apiClient.post("/game/control", {
+    action,
+    gameId: gameId || null,
+  });
+  return res.data;
+}
+
 
