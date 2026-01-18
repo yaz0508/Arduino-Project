@@ -33,10 +33,11 @@ const int PIN_BUZZER = 4;  // Player 2 Buzzer
 // ---- Game tuning ----
 const int SENSOR_THRESHOLD = 2000;
 const int WIN_SCORE = 100;
+const int POINTS_PER_HIT = 10;  // Points awarded per hit
 const unsigned long SAMPLE_INTERVAL_MS = 50;
-const unsigned long HIT_MIN_DURATION_MS = 200;
+const unsigned long HIT_MIN_DURATION_MS = 100;  // 0.1 seconds to register a hit
 const unsigned long COOL_DOWN_MS = 100;
-const unsigned long SCORE_TICK_MS = 100;
+const unsigned long SCORE_TICK_MS = 100;  // Award points every 100ms
 const unsigned long POLL_INTERVAL_MS = 2000;  // Check server every 2 seconds
 
 // ======================== TYPES & STATE ========================
@@ -168,12 +169,8 @@ void sendScoreUpdate() {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(3000);
 
-  String body;
-  if (PLAYER_NUMBER == 1) {
-    body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":" + String(player.score) + ",\"player2Score\":0}";
-  } else {
-    body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":0,\"player2Score\":" + String(player.score) + "}";
-  }
+  // Player 2 only sends its own score
+  String body = "{\"gameId\":\"" + currentGameId + "\",\"player2Score\":" + String(player.score) + "}";
   
   Serial.print("Sending Score: ");
   Serial.println(body);
@@ -215,13 +212,32 @@ void sampleSensors() {
     sensors[i].value = raw;
     bool isBelow = (raw < SENSOR_THRESHOLD);  // Active Low: laser blocks light = low reading
 
+    // DEBUG: Log sensor readings when below threshold
+    static unsigned long lastDebugTime = 0;
+    if (now - lastDebugTime > 500) {
+      lastDebugTime = now;
+      Serial.print("Sensor ");
+      Serial.print(i);
+      Serial.print(": ");
+      Serial.print(raw);
+      Serial.print(" (");
+      Serial.print(isBelow ? "HIT" : "safe");
+      Serial.println(")");
+    }
+
     if (isBelow) {
       if (!sensors[i].aboveThreshold) {
         sensors[i].aboveThreshold = true;
         sensors[i].aboveStartTime = now;
+        Serial.print("🔴 Sensor ");
+        Serial.print(i);
+        Serial.println(" triggered!");
       } else {
         if (!sensors[i].validHit && (now - sensors[i].aboveStartTime >= HIT_MIN_DURATION_MS)) {
           sensors[i].validHit = true;
+          Serial.print("✓ Sensor ");
+          Serial.print(i);
+          Serial.println(" valid hit!");
         }
       }
     } else {
@@ -246,12 +262,20 @@ void updatePlayerScoring(PlayerState& p) {
     if (p.scoringActive) {
       p.scoringActive = false;
       p.cooldownUntil = now + COOL_DOWN_MS;
+      Serial.println("❌ Hit ended - cooldown activated");
     }
     return;
   }
 
+  // DEBUG: Log game state
+  Serial.print("Game State: ");
+  Serial.println(gameState == STATE_RUNNING ? "RUNNING" : (gameState == STATE_IDLE ? "IDLE" : "FINISHED"));
+
   if (!p.scoringActive) {
-    if (now < p.cooldownUntil) return;
+    if (now < p.cooldownUntil) {
+      Serial.println("⏳ In cooldown, ignoring hit");
+      return;
+    }
 
     p.scoringActive = true;
     p.activeSensorIndex = bestSensor;
@@ -264,9 +288,14 @@ void updatePlayerScoring(PlayerState& p) {
     unsigned long elapsed = now - p.lastScoreTick;
     if (elapsed >= SCORE_TICK_MS) {
       int ticks = elapsed / SCORE_TICK_MS;
-      p.score += ticks;
+      p.score += ticks * POINTS_PER_HIT;  // 10 points per hit
       if (p.score > WIN_SCORE) p.score = WIN_SCORE;
       p.lastScoreTick += ticks * SCORE_TICK_MS;
+
+      Serial.print("📊 Score updated: +");
+      Serial.print(ticks * POINTS_PER_HIT);
+      Serial.print(" = ");
+      Serial.println(p.score);
 
       // Check win condition
       if (p.score >= WIN_SCORE) {
@@ -303,6 +332,7 @@ void updatePlayerScoring(PlayerState& p) {
 // ======================== GAME CONTROL ========================
 
 void startGame() {
+  Serial.println("\n🎮🎮🎮 GAME STARTED 🎮🎮🎮");
   Serial.println("Game Running - Sensors Active");
   Serial.print("Game ID: ");
   Serial.println(currentGameId);
@@ -314,15 +344,17 @@ void startGame() {
 
   // Start beep
   buzzerPulse(buzzer, 200);
+  Serial.println("🔊 Start beep activated!");
 }
 
 void stopGame() {
-  Serial.println("Game Stopped");
+  Serial.println("\n⏹⏹⏹ GAME STOPPED ⏹⏹⏹");
   gameState = STATE_IDLE;
   currentGameId = "";
 
   // Stop beep
   buzzerPulse(buzzer, 500);
+  Serial.println("🔊 Stop beep activated!");
 }
 
 // ======================== SETUP & LOOP ========================
@@ -381,7 +413,7 @@ void loop() {
     pollServerStatus();
   }
 
-  // 2. GAME LOGIC (Only if game is RUNNING)
+  // 2. GAME LOGIC (Only if game is RUNNING - NOT finished)
   if (gameState == STATE_RUNNING) {
     if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
       lastSampleTime += SAMPLE_INTERVAL_MS;
@@ -399,5 +431,6 @@ void loop() {
     }
   }
 
+  // 3. Update buzzer (always runs regardless of game state)
   updateBuzzer();
 }

@@ -95,12 +95,14 @@ app.post("/game/score", async (req: Request, res: Response) => {
   }
 
   try {
+    // Build update object with only provided fields (don't overwrite with undefined or 0)
+    const updateData: any = {};
+    if (body.player1Score !== undefined) updateData.player1Score = body.player1Score;
+    if (body.player2Score !== undefined) updateData.player2Score = body.player2Score;
+
     const match = await prisma.match.update({
       where: { gameId: body.gameId },
-      data: {
-        player1Score: body.player1Score ?? undefined,
-        player2Score: body.player2Score ?? undefined
-      }
+      data: updateData
     });
 
     return res.status(200).json({ ok: true, match });
@@ -129,7 +131,11 @@ app.post("/game/end", async (req: Request, res: Response) => {
       }
     });
 
-    return res.status(200).json({ ok: true, match });
+    // Reset global game status so ESP32s stop when they poll
+    gameStatus = { status: "IDLE", gameId: null };
+    console.log(`Game ${body.gameId} finished with winner: ${body.winner}`);
+
+    return res.status(200).json({ ok: true });
   } catch (err) {
     console.error(err);
     return res.status(404).json({ error: "Match not found" });
