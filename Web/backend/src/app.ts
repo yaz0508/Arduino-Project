@@ -150,6 +150,15 @@ app.get("/matches", async (_req: Request, res: Response) => {
   }
 });
 
+// GET /game/status - Returns current game status (RUNNING or IDLE)
+// IMPORTANT: This must come BEFORE /game/:gameId to avoid route matching issues
+// ESP32s poll this endpoint to know when to start/stop
+let gameStatus: { status: "IDLE" | "RUNNING"; gameId: string | null } = { status: "IDLE", gameId: null };
+
+app.get("/game/status", (_req: Request, res: Response) => {
+  res.status(200).json(gameStatus);
+});
+
 // GET /game/:gameId - live status for a specific game (for Game Page polling)
 app.get("/game/:gameId", async (req: Request, res: Response) => {
   const { gameId } = req.params;
@@ -165,14 +174,6 @@ app.get("/game/:gameId", async (req: Request, res: Response) => {
     console.error(err);
     return res.status(500).json({ error: "Internal server error" });
   }
-});
-
-// GET /game/status - Returns current game status (RUNNING or IDLE)
-// ESP32s poll this endpoint to know when to start/stop
-let gameStatus: { status: "IDLE" | "RUNNING"; gameId: string | null } = { status: "IDLE", gameId: null };
-
-app.get("/game/status", (_req: Request, res: Response) => {
-  res.status(200).json(gameStatus);
 });
 
 // POST /game/control - Admin endpoint to start/stop game

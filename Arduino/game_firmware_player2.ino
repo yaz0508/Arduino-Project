@@ -1,7 +1,8 @@
-// ESP32 Laser Game - Web Controlled Edition (No Physical Buttons)
+// ESP32 Laser Game - Web Controlled Edition (PLAYER 2)
 // - The ESP32 polls the backend server to check if game is RUNNING
 // - Web dashboard controls start/stop via backend
-// - Both vests sync automatically
+// - Vests sync automatically
+// - This firmware is for PLAYER 2 VEST ONLY
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -16,22 +17,18 @@ const char* WIFI_PASSWORD = "sigepo123";
 const char* BACKEND_BASE_URL = "https://lazer-game-backend.onrender.com";
 const char* API_GAME_STATUS  = "/game/status";   // Poll this
 const char* API_GAME_SCORE   = "/game/score";    // Send score updates
-const char* API_GAME_CONTROL = "/game/control";  // Admin only
 
 // ---- Player configuration ----
-const char* PLAYER1_NAME = "Player 1";
-const char* PLAYER2_NAME = "Player 2";
+const char* PLAYER_NAME = "Player 2";
+const int PLAYER_NUMBER = 2;  // 2 for this vest
 
-// ---- Pin assignments ----
+// ---- Pin assignments (PLAYER 2 ONLY) ----
 // Sensors (ADC Pins)
-const int PIN_P1_S1 = 32;  // Player 1 Sensor 1
-const int PIN_P1_S2 = 33;  // Player 1 Sensor 2
-const int PIN_P2_S1 = 34;  // Player 2 Sensor 1
-const int PIN_P2_S2 = 35;  // Player 2 Sensor 2
+const int PIN_SENSOR_1 = 34;  // Sensor 1
+const int PIN_SENSOR_2 = 35;  // Sensor 2
 
-// Buzzers
-const int PIN_P1_BUZZER = 25; // Player 1 Buzzer
-const int PIN_P2_BUZZER = 4;  // Player 2 Buzzer
+// Buzzer
+const int PIN_BUZZER = 4;  // Player 2 Buzzer
 
 // ---- Game tuning ----
 const int SENSOR_THRESHOLD = 2000;
@@ -58,7 +55,7 @@ struct SensorState {
   bool validHit;
 };
 
-struct PlayerBuzzer {
+struct Buzzer {
   int pin;
   bool active;
   unsigned long offAt;
@@ -72,17 +69,15 @@ struct PlayerState {
   bool scoringActive;
   unsigned long cooldownUntil;
   unsigned long lastScoreTick;
-  PlayerBuzzer* myBuzzer;
+  Buzzer* buzzer;
 };
 
 // ======================== GLOBALS ========================
 
 GameState gameState = STATE_IDLE;
-SensorState sensors[4];
-PlayerBuzzer buzzer1;
-PlayerBuzzer buzzer2;
-PlayerState player1;
-PlayerState player2;
+SensorState sensors[2];  // Only 2 sensors for this player
+Buzzer buzzer;
+PlayerState player;
 
 String currentGameId = "";
 unsigned long lastSampleTime = 0;
@@ -90,22 +85,21 @@ unsigned long lastPollTime = 0;
 
 // ======================== BUZZER FUNCTIONS ========================
 
-void setBuzzerState(PlayerBuzzer& b, bool on) {
+void setBuzzerState(Buzzer& b, bool on) {
   digitalWrite(b.pin, on ? HIGH : LOW);
   b.active = on;
   if (!on) b.offAt = 0;
 }
 
-void buzzerPulse(PlayerBuzzer& b, unsigned long durationMs) {
+void buzzerPulse(Buzzer& b, unsigned long durationMs) {
   unsigned long now = millis();
   setBuzzerState(b, true);
   b.offAt = now + durationMs;
 }
 
-void updateBuzzers() {
+void updateBuzzer() {
   unsigned long now = millis();
-  if (buzzer1.active && now >= buzzer1.offAt) setBuzzerState(buzzer1, false);
-  if (buzzer2.active && now >= buzzer2.offAt) setBuzzerState(buzzer2, false);
+  if (buzzer.active && now >= buzzer.offAt) setBuzzerState(buzzer, false);
 }
 
 // ======================== POLLING & SYNC ========================
@@ -174,7 +168,12 @@ void sendScoreUpdate() {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(3000);
 
-  String body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":" + String(player1.score) + ",\"player2Score\":" + String(player2.score) + "}";
+  String body;
+  if (PLAYER_NUMBER == 1) {
+    body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":" + String(player.score) + ",\"player2Score\":0}";
+  } else {
+    body = "{\"gameId\":\"" + currentGameId + "\",\"player1Score\":0,\"player2Score\":" + String(player.score) + "}";
+  }
   
   Serial.print("Sending Score: ");
   Serial.println(body);
@@ -189,31 +188,29 @@ void sendScoreUpdate() {
 // ======================== SENSOR & SCORING ========================
 
 void initSensors() {
-  sensors[0].pin = PIN_P1_S1;
-  sensors[1].pin = PIN_P1_S2;
-  sensors[2].pin = PIN_P2_S1;
-  sensors[3].pin = PIN_P2_S2;
+  sensors[0].pin = PIN_SENSOR_1;
+  sensors[1].pin = PIN_SENSOR_2;
 
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 2; i++) {
     sensors[i].value = 0;
     sensors[i].aboveThreshold = false;
     sensors[i].validHit = false;
   }
 }
 
-void resetPlayer(PlayerState& p, int idxA, int idxB, PlayerBuzzer* b) {
+void resetPlayer(PlayerState& p, int idxA, int idxB, Buzzer* b) {
   p.sensorIndexA = idxA;
   p.sensorIndexB = idxB;
   p.score = 0;
   p.activeSensorIndex = -1;
   p.scoringActive = false;
   p.cooldownUntil = 0;
-  p.myBuzzer = b;
+  p.buzzer = b;
 }
 
 void sampleSensors() {
   unsigned long now = millis();
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 2; i++) {
     int raw = analogRead(sensors[i].pin);
     sensors[i].value = raw;
     bool isBelow = (raw < SENSOR_THRESHOLD);  // Active Low: laser blocks light = low reading
@@ -234,14 +231,14 @@ void sampleSensors() {
   }
 }
 
-void updatePlayerScoring(PlayerState& p, const char* playerName) {
+void updatePlayerScoring(PlayerState& p) {
   unsigned long now = millis();
 
   bool hitA = sensors[p.sensorIndexA].validHit;
   bool hitB = sensors[p.sensorIndexB].validHit;
   int bestSensor = -1;
 
-  if (hitA && hitB) bestSensor = (sensors[p.sensorIndexA].value > sensors[p.sensorIndexB].value) ? p.sensorIndexA : p.sensorIndexB;
+  if (hitA && hitB) bestSensor = (sensors[p.sensorIndexA].value < sensors[p.sensorIndexB].value) ? p.sensorIndexA : p.sensorIndexB;
   else if (hitA) bestSensor = p.sensorIndexA;
   else if (hitB) bestSensor = p.sensorIndexB;
 
@@ -259,7 +256,7 @@ void updatePlayerScoring(PlayerState& p, const char* playerName) {
     p.scoringActive = true;
     p.activeSensorIndex = bestSensor;
     p.lastScoreTick = now;
-    buzzerPulse(*p.myBuzzer, 100);
+    buzzerPulse(*p.buzzer, 100);
     Serial.println("🎯 HIT DETECTED - Buzzer activated!");
   }
 
@@ -274,9 +271,9 @@ void updatePlayerScoring(PlayerState& p, const char* playerName) {
       // Check win condition
       if (p.score >= WIN_SCORE) {
         Serial.print(">>> ");
-        Serial.print(playerName);
+        Serial.print(PLAYER_NAME);
         Serial.println(" WINS! <<<");
-        buzzerPulse(*p.myBuzzer, 2000);  // Victory buzz
+        buzzerPulse(*p.buzzer, 2000);  // Victory buzz
         gameState = STATE_FINISHED;
         
         // Save game to database
@@ -286,8 +283,8 @@ void updatePlayerScoring(PlayerState& p, const char* playerName) {
           http.addHeader("Content-Type", "application/json");
           http.setTimeout(3000);
           
-          String body = "{\"gameId\":\"" + currentGameId + "\",\"winner\":\"" + String(playerName) + 
-                        "\",\"player1Score\":" + String(player1.score) + ",\"player2Score\":" + String(player2.score) + "}";
+          String body = "{\"gameId\":\"" + currentGameId + "\",\"winner\":\"" + String(PLAYER_NAME) + 
+                        "\",\"player1Score\":" + (PLAYER_NUMBER == 1 ? String(p.score) : "0") + ",\"player2Score\":" + (PLAYER_NUMBER == 2 ? String(p.score) : "0") + "}";
           
           int httpCode = http.POST(body);
           if (httpCode == 200) {
@@ -310,15 +307,13 @@ void startGame() {
   Serial.print("Game ID: ");
   Serial.println(currentGameId);
 
-  resetPlayer(player1, 0, 1, &buzzer1);
-  resetPlayer(player2, 2, 3, &buzzer2);
+  resetPlayer(player, 0, 1, &buzzer);
   initSensors();
 
   gameState = STATE_RUNNING;
 
   // Start beep
-  buzzerPulse(buzzer1, 200);
-  buzzerPulse(buzzer2, 200);
+  buzzerPulse(buzzer, 200);
 }
 
 void stopGame() {
@@ -327,8 +322,7 @@ void stopGame() {
   currentGameId = "";
 
   // Stop beep
-  buzzerPulse(buzzer1, 500);
-  buzzerPulse(buzzer2, 500);
+  buzzerPulse(buzzer, 500);
 }
 
 // ======================== SETUP & LOOP ========================
@@ -337,20 +331,16 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println("\n\n=== LASER GAME SYSTEM STARTING (Web-Controlled) ===");
+  Serial.println("\n\n=== LASER GAME SYSTEM STARTING (Web-Controlled - PLAYER 2) ===");
 
-  // Setup Buzzers
-  buzzer1.pin = PIN_P1_BUZZER;
-  buzzer2.pin = PIN_P2_BUZZER;
-  pinMode(buzzer1.pin, OUTPUT);
-  pinMode(buzzer2.pin, OUTPUT);
-  setBuzzerState(buzzer1, false);
-  setBuzzerState(buzzer2, false);
+  // Setup Buzzer
+  buzzer.pin = PIN_BUZZER;
+  pinMode(buzzer.pin, OUTPUT);
+  setBuzzerState(buzzer, false);
 
   // Setup Sensors
   initSensors();
-  resetPlayer(player1, 0, 1, &buzzer1);
-  resetPlayer(player2, 2, 3, &buzzer2);
+  resetPlayer(player, 0, 1, &buzzer);
 
   // Connect WiFi
   Serial.print("Connecting to WiFi: ");
@@ -377,7 +367,7 @@ void setup() {
 
   // Startup beeps
   for (int i = 0; i < 3; i++) {
-    buzzerPulse(buzzer1, 100);
+    buzzerPulse(buzzer, 100);
     delay(150);
   }
 }
@@ -396,21 +386,18 @@ void loop() {
     if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
       lastSampleTime += SAMPLE_INTERVAL_MS;
       sampleSensors();
-      updatePlayerScoring(player1, PLAYER1_NAME);
-      updatePlayerScoring(player2, PLAYER2_NAME);
+      updatePlayerScoring(player);
 
       // Send score updates periodically
       static int scoreUpdateCounter = 0;
       if (++scoreUpdateCounter >= 20) {  // Every ~1 second
         scoreUpdateCounter = 0;
-        Serial.print("📊 Score - P1: ");
-        Serial.print(player1.score);
-        Serial.print(" | P2: ");
-        Serial.println(player2.score);
+        Serial.print("📊 My Score: ");
+        Serial.println(player.score);
         sendScoreUpdate();
       }
     }
   }
 
-  updateBuzzers();
+  updateBuzzer();
 }
