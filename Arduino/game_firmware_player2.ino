@@ -212,17 +212,19 @@ void sampleSensors() {
     sensors[i].value = raw;
     bool isBelow = (raw < SENSOR_THRESHOLD);  // Active Low: laser blocks light = low reading
 
-    // DEBUG: Log sensor readings when below threshold
+    // ALWAYS log sensor readings to diagnose the issue
     static unsigned long lastDebugTime = 0;
-    if (now - lastDebugTime > 500) {
+    if (now - lastDebugTime > 200) {  // Log every 200ms instead of 500ms
       lastDebugTime = now;
       Serial.print("Sensor ");
       Serial.print(i);
-      Serial.print(": ");
+      Serial.print(" (GPIO ");
+      Serial.print(sensors[i].pin);
+      Serial.print("): ");
       Serial.print(raw);
       Serial.print(" (");
       Serial.print(isBelow ? "HIT" : "safe");
-      Serial.println(")");
+      Serial.print(") ");
     }
 
     if (isBelow) {
@@ -245,6 +247,7 @@ void sampleSensors() {
       sensors[i].validHit = false;
     }
   }
+  Serial.println();  // New line after both sensors
 }
 
 void updatePlayerScoring(PlayerState& p) {

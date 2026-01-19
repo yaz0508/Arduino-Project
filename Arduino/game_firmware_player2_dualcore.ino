@@ -214,33 +214,40 @@ void setup() {
 void loop() {
   // This runs on CORE 1 and is NEVER blocked by WiFi!
   
+  // ALWAYS log sensor readings (helps debug false scoring)
+  static unsigned long lastLogTime = 0;
+  unsigned long now = millis();
+  
+  int val1 = analogRead(PIN_SENSOR_1);
+  int val2 = analogRead(PIN_SENSOR_2);
+  
+  bool hit1 = (val1 < SENSOR_THRESHOLD);
+  bool hit2 = (val2 < SENSOR_THRESHOLD);
+  
+  // Log sensor readings every 500ms regardless of game state
+  if (now - lastLogTime > 500) {
+    lastLogTime = now;
+    Serial.print("[Core 1] Sensor 1: ");
+    Serial.print(val1);
+    Serial.print(" (");
+    Serial.print(hit1 ? "HIT" : "safe");
+    Serial.print(") | Sensor 2: ");
+    Serial.print(val2);
+    Serial.print(" (");
+    Serial.print(hit2 ? "HIT" : "safe");
+    Serial.println(")");
+  }
+  
   if (gameRunning && !hasWon) {
-    // Read both sensors
-    int val1 = analogRead(PIN_SENSOR_1);
-    int val2 = analogRead(PIN_SENSOR_2);
-    
-    bool hit1 = (val1 < SENSOR_THRESHOLD);
-    bool hit2 = (val2 < SENSOR_THRESHOLD);
-    
-    // Log sensor readings periodically
-    static unsigned long lastLogTime = 0;
-    unsigned long now = millis();
-    if (now - lastLogTime > 500) {
-      lastLogTime = now;
-      Serial.print("[Core 1] Sensor 1: ");
-      Serial.print(val1);
-      Serial.print(" (");
-      Serial.print(hit1 ? "HIT" : "safe");
-      Serial.print(") | Sensor 2: ");
-      Serial.print(val2);
-      Serial.print(" (");
-      Serial.print(hit2 ? "HIT" : "safe");
-      Serial.println(")");
-    }
-    
     // Process hits with cooldown
     if ((hit1 || hit2) && (now - lastHitTime > HIT_COOLDOWN_MS)) {
       lastHitTime = now;
+      
+      // DEBUG: Log hit detection
+      Serial.print("[Core 1] HIT DETECTED! val1=");
+      Serial.print(val1);
+      Serial.print(" val2=");
+      Serial.println(val2);
       
       // Award points
       localScore += POINTS_PER_HIT;
@@ -261,6 +268,11 @@ void loop() {
         // Victory buzz (2 seconds)
         buzzerPulse(2000);
       }
+    }
+  } else if (!gameRunning) {
+    // Log when game is not running (debug false scoring)
+    if (hit1 || hit2) {
+      Serial.println("[Core 1] ⚠ Sensor hit detected but game is NOT running");
     }
   }
   
